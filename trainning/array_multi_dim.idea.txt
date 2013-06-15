@@ -1,0 +1,205 @@
+发信人: fentoyal (fentoyal), 信区: CPlusPlus
+标  题: [技巧]任意维的连续空间数组的动态分配方法（模板）
+发信站: 水木社区 (Tue Apr 12 10:44:50 2011), 站内
+
+(谢谢ilovecpp的提醒，修改了下，不用返回那个丑陋的void *了)
+    虽然这个时代各种容器横行，但是有时还是得要用数组，快啊。
+    当然得要动态分配的，常见方法一般要么就将多维转成一维，算坐标换算，麻烦啊；
+    要么就是先分配n个第一维，再用一个高维数组装这n个指针。但这样其实整个空间并不是连续的。
+
+    心目中理想的三维数组分配器应该能达到类似这样静态分配的效果：
+    int arr3d[4][5][6] = {0};
+这样分配出的空间的好处是,任意维都是连续的:
+arr3d[1][2][3] equals (*arr3d)[1*5 + 2][3] equals (**arr3d)[1*5*6 + 2*6 + 3]
+当然，想用动态分配达到这样的效果的方法也挺常见，就是代码很麻烦，而且只是针对某一维度，没有普
+适性。由于我经常要各种高维的数组，所以自己写了一个能分配任意维的理想数组的模板。代码包含分配
+和释放两个接口。其中分配有alloc 和 new 两种。 code有点长，主要思想是类模板的递归继承&实例化 
+及模板的partial instantiation。
+
+主要的逻辑:
+1 分配整个的容纳数据的空间。
+2 通过模板类的递归实例化，实现一层一层建立容纳低级数组指针的高一级的数组
+3 最下面的那个模板就是递归实例化的结束条件。
+
+Note 
+1 用类模板的原因是，函数模板不支持partial instantiation，就无法实现递归实例化。
+2 谢谢ilovecpp同学的提醒，用typedef的话，就可以提前确定返回类型有几颗*（多少维指针）
+3 异常是能一级一级的抛到最外面的
+4 继承是想照顾下protect里那俩函数，不用继承都public也是可以的。
+
+template <typename ElemClass, size_t N_Dim>  
+class DynArrBuilder : public DynArrBuilder<ElemClass*, N_Dim-1> 
+{ 
+    enum {ERR_OK, ERR_PTR_NUL,};
+    public:
+    typedef typename DynArrBuilder<ElemClass*, N_Dim-1>::FinalType FinalType;
+
+    protected: 
+    static FinalType _bldCurDim(size_t sizec, size_t sizes[], ElemClass lower_dim) 
+    {  
+        size_t dim_size = 1; 
+        for (size_t i = 0; i < sizec; ++i) 
+            dim_size *= sizes[i]; 
+        ElemClass* higher_dim = new ElemClass[dim_size];      
+        higher_dim[0] = lower_dim; 
+        for (size_t i = 1; i < dim_size; ++i) 
+            higher_dim[i] = higher_dim[i - 1] + sizes[sizec]; 
+        return DynArrBuilder <ElemClass*, N_Dim - 1>::_bldCurDim(sizec - 1, sizes, higher_dim);  
+    }
+
+    static ElemClass _freeCurDim(FinalType ptr)
+    { 
+        ElemClass * cur_ptr = DynArrBuilder <ElemClass*, N_Dim - 1>::_freeCurDim(ptr); 
+        if (cur_ptr == NULL) return NULL; 
+        ElemClass lower_ptr = *cur_ptr; 
+        delete [] (cur_ptr);     
+        return lower_ptr; 
+    } 
+
+    public: 
+    static FinalType arrallocate(size_t sizes[])
+    {
+        size_t dim_size = 1; 
+        for (size_t i = 0; i < N_Dim; ++i)  
+            dim_size *= sizes[i];  
+        // operator new equals malloc，no constructor called
+        ElemClass* base = reinterpret_cast <ElemClass*> (operator new (dim_size*sizeof(ElemClass))); 
+        return DynArrBuilder <ElemClass*, N_Dim - 1>::_bldCurDim(N_Dim - 1, sizes, base); 
+    }
+
+    static FinalType arrnew(size_t sizes[])  
+    {
+        size_t dim_size = 1; 
+        for (size_t i = 0; i < N_Dim; ++i) 
+            dim_size *= sizes[i];     
+        ElemClass* base = new ElemClass[dim_size]; 
+        return DynArrBuilder <ElemClass*, N_Dim - 1>::_bldCurDim(N_Dim - 1, sizes, base); 
+    }
+
+    static int arrfree(FinalType ptr)   
+    {
+        if (ptr == NULL) return ERR_PTR_NUL; 
+        ElemClass * cur_ptr = DynArrBuilder <ElemClass*, N_Dim - 1>::_freeCurDim(ptr); 
+        if (cur_ptr == NULL) return ERR_PTR_NUL; 
+        operator delete (cur_ptr); 
+        return ERR_OK;
+    } 
+
+    static int arrdelete(FinalType ptr) 
+    { 
+        if (ptr == NULL) return ERR_PTR_NUL; 
+        ElemClass * cur_ptr = DynArrBuilder <ElemClass*, N_Dim - 1>::_freeCurDim(ptr); 
+        if (cur_ptr == NULL) return ERR_PTR_NUL; 
+        delete [] cur_ptr; 
+        return ERR_OK; 
+    }
+}; 
+
+template <class ElemClass> 
+class DynArrBuilder< ElemClass, 0>
+{ 
+    protected: 
+        typedef ElemClass FinalType;
+        static FinalType _bldCurDim (size_t sizec, size_t sizes[], ElemClass lower_base) {  return lower_base;  } 
+        static ElemClass _freeCurDim(FinalType ptr) { return (ptr); } 
+}; 
+
+USAGE：
+size_t sizes[] = {2,3,3,3}; //2 is the highest dimension.
+MyClass **** my_classes = DynArrBuilder<MyClass, 4>::arrnew(sizes) ;
+DynArrBuilder<MyClass, 4>::arrdelete(my_classes);
+/**********************************************/
+BT USAGE：//分配一个10000维数组，每维度大小等于当前维数
+size_t sizes[10000];
+for (int i = 0; i < 10000; ++i)
+sizes[i] = 10000 - i;
+DynArrBuilder<MyClass, 10000>::FinalType my_classes = DynArrBuilder<MyClass, 10000>::arrnew(sizes) ;
+DynArrBuilder<MyClass, 10000>::arrdelete(my_classes);
+
+_________________________________________________________________________________________
+
+发信人: azulla (azulla), 信区: CPlusPlus
+标  题: 也发一个N维动态数组（内存连续分配）模板
+发信站: 水木社区 (Tue Apr 19 00:06:39 2011), 站内
+
+看了fentoyal写的《[技巧]任意维的连续空间数组的动态分配方法(模板)》 
+http://www.newsmth.net/bbstcon.php?board=CPlusPlus&gid=321891
+
+觉得空间浪费比较严重，访问内存开销太大。感觉boost的MultiArray不够轻量，
+C99的变长数组只能在栈上，就花了几个小时实现了下。原理很简单，就是重载
+operator[]返回一个代理类。看了下三维时的汇编代码(g++ -O3)，临时对像都
+被优化掉，跟手动计算一样高效。
+
+用法： 
+unsigned src[3] = { 4, 3, 2}; 
+Marray<int, 3> mm(src);   
+mm[3][2][1] = 7;
+const int *p = &mm;
+
+template<typename R, size_t M> 
+struct Proxy 
+{
+    R* ptr;
+    size_t* total_size;  //total_size[M] M维数组的大小, total_size[0]为边界指针的地址 
+    Proxy(R* p, size_t* q): ptr(p), total_size(q) {}
+    R* operator&() { assert(size_t(ptr) < total_size[0]);  return ptr; }  //--
+    const R* operator&() const { assert(size_t(ptr) < total_size[0]);  return ptr; }
+    Proxy<R, M - 1> operator[](size_t index) { return  Proxy<R, M - 1>(ptr + total_size[M - 1] * index, total_size); }
+    const Proxy<R, M - 1> operator[](size_t index) const { return  Proxy<R, M - 1>(ptr + total_size[M - 1] * index, total_size); }
+};
+
+template<typename R> struct Proxy<R, 0>{};
+
+template<typename R>
+struct Proxy<R, 1>
+{
+    R* ptr;         
+    size_t* total_size;  //total_size[M] M维数组的大小, total_size[0]为边界指针的地址 
+    Proxy(R* p, size_t* q): ptr(p), total_size(q) {}
+    R* operator&() { assert(size_t(ptr) < total_size[0]);  return ptr; }  //--
+    const R* operator&() const { assert(size_t(ptr) < total_size[0]);  return ptr; }
+
+    //---特化
+    R& operator[](size_t index) { 
+        assert(size_t(ptr + index) < total_size[0]);
+        return ptr[index]; 
+    }
+
+    const R& operator[](size_t index) const {
+        assert(size_t(ptr + index) < total_size[0]);
+        return ptr[index]; 
+    } 
+};
+
+template<typename T, size_t N>        //Multi-array
+class Marray
+{
+    public:
+        typedef T value_type;
+        explicit Marray(unsigned src[]) {
+            size_t total = 1;                       //total_size[M] M维数组的大小        
+            for (size_t i = N; i-- > 0; total *= src[i]) total_size[N - 1 - i] = total;
+            total_size[N] = total;
+            ptr = new T[total];
+            total_size[0] = size_t(ptr + total);    //total_size[0]用于边界判断
+        }
+
+        ~Marray() { delete[] ptr; }
+
+        size_t array_size(size_t m) {  assert(m > 0); return total_size[m]; } 
+
+        //or: return Proxy<T, N>(ptr, total_size)[index];
+        Proxy<T, N-1> operator[](size_t index) { return Proxy<T, N-1>(ptr + total_size[N-1] * index, total_size); }
+
+        const Proxy<T, N-1> operator[](size_t index) const { return Proxy<T, N-1>(ptr + total_size[N-1] * index, total_size); }
+
+        T* operator&() { return ptr; }  //--
+        const T* operator&() const { return ptr; }  
+
+    private:
+        T* ptr;
+        size_t total_size[N + 1];
+};
+
+template<typename T> class Marray<T, 0>{}; 
+template<typename T> class Marray<T, 1>{}; 
